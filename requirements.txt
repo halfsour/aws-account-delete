@@ -4,3 +4,4 @@ boto3
 # mkdir -p python/lib/python3.9/site-packages
 # pip3 install -r ../requirements.txt --target python/lib/python3.9/site-packages/.
 # zip -r ../boto3.zip .
+# upload the zip as a new layer in the Lambda console or use cli to create the layer and attach it to the function
