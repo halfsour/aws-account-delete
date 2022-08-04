@@ -1,1 +1,6 @@
 boto3
+
+#Create a Lambda layer with the latest boto3
+# mkdir -p python/lib/python3.9/site-packages
+# pip3 install -r ../requirements.txt --target python/lib/python3.9/site-packages/.
+# zip -r ../boto3.zip .
