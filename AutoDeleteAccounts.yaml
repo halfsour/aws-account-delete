@@ -5,21 +5,19 @@ Parameters:
     Type: String
     Description: The age in days after which the account should be deleted
   activeOuId:
+    Default: ou-8rh6-yodb3pse
     Type: String
     Description: The OU Id that will be checked for deletable accounts
   closingOuId:
+    Default: ou-8rh6-j7xusnjo
     Type: String
     Description: The OU Id where accounts will go to await deletion
-  assumeRoleName:
-    Description: The name of the IAM Role to be assumed within each account, providing permissions to cleanse the account(s)
-    Type: String
 
 Resources:
 #Gather the list of AWS Accounts that should be deleted and send it to SQS
   deletableAccountsQueue:
     Type: AWS::SQS::Queue
-    Properties: 
-      QueueName: deletableAccounts
+    Properties: {}
   getDeletableAccountsLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -50,17 +48,18 @@ Resources:
               Effect: Allow
               Action:
                 - organizations:ListChildren
-                - organizations:DescribeAccounts
-              Resource: *
+                - organizations:DescribeAccount
+              Resource: '*'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
   getDeletableAccountsLambda:
     Type: AWS::Lambda::Function
     Properties:
-    Environment:
-      Variables:
-        SQS_QUEUE_URL: !GetAtt deletableAccountsQueue.QueueUrl
-        ACTIVE_OU_ID: !Ref activeOuId 
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt deletableAccountsQueue.QueueUrl
+          ACTIVE_OU_ID: !Ref activeOuId
+          AGE: !Ref age
       Code:
         ZipFile: |
           import json
@@ -75,8 +74,8 @@ Resources:
               return diff.days
               
           def lambda_handler(event, context):
-              age = 30
-              queue = os.environ['SSM_PARAMETER_NAME']
+              age = int(os.environ['AGE'])
+              queue = os.environ['SQS_QUEUE_URL']
               ou = os.environ['ACTIVE_OU_ID'] 
               orgs = boto3.client('organizations')
               sqs = boto3.client('sqs')
@@ -86,15 +85,14 @@ Resources:
               )
               for i in accounts['Children']:
                   account = orgs.describe_account(AccountId=i['Id'])
-                  print(account)
                   create_date = account['Account']['JoinedTimestamp']
                   account_age = days_old(create_date)
-                  print(account_age)
-                  if account_age > 30:
+                  if account_age > age:
                       msg = sqs.send_message(
                           QueueUrl=queue,
                           MessageBody=account['Account']['Id']
                       )
+                      print("staging for delete: " + account['Account']['Id'] )
       Handler: index.lambda_handler
       MemorySize: 128
       Role: !GetAtt getDeletableAccountsLambdaRole.Arn
@@ -103,7 +101,7 @@ Resources:
   getDeletableAccountsLambdaRule:
     Type: AWS::Events::Rule
     Properties:
-      ScheduleExpression: rate(daily)
+      ScheduleExpression: rate(1 day)
       State: ENABLED
       Targets:
         -
@@ -117,7 +115,7 @@ Resources:
       FunctionName: !GetAtt getDeletableAccountsLambda.Arn
       Principal: events.amazonaws.com
       SourceArn: !GetAtt getDeletableAccountsLambdaRule.Arn
-#Move the Account to the CloseWait OU & deletion
+#Move the Account to the Closing OU & deletion
   moveThenDeleteAccountLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -131,7 +129,28 @@ Resources:
             Condition: {}
       Path: /
       Policies:
-        - PolicyName: orgs
+        - PolicyName: sqs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: sqs
+              Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt deletableAccountsQueue.Arn
+        - PolicyName: moveNtag
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: moveNtag
+              Effect: Allow
+              Action: 
+                - organizations:TagResource
+                - organizations:MoveAccount
+              Resource: '*'
+        - PolicyName: orgsClose
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -139,10 +158,13 @@ Resources:
               Effect: Allow
               Action:
                 - organizations:CloseAccount
-              Resource: !Sub 'arn:aws:organizations::*:account/${closeWaitOuId}/*'
+              Resource: '*'
+              Condition:
+                StringEquals: 
+                  'aws:ResourceTag/CloseAccount': true
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-  moveThenCleanAccountTrigger:
+  moveThenDeleteAccountTrigger:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt deletableAccountsQueue.Arn
@@ -150,10 +172,10 @@ Resources:
   moveThenDeleteAccountLambda:
     Type:  AWS::Lambda::Function
     Properties:
-    Environment:
-      Variables:
-        CLOSING_OU_ID: !Ref closingOuId
-        ACTIVE_OU_ID: !Ref activeOuId
+      Environment:
+        Variables:
+          CLOSING_OU_ID: !Ref closingOuId
+          ACTIVE_OU_ID: !Ref activeOuId
       Code:
         ZipFile: |
           import json
@@ -175,6 +197,16 @@ Resources:
                       DestinationParentId=close_org
                   )
                   print(payload + " moved.")
+                  #Tag Account
+                  tag = orgs.tag_resource(
+                      ResourceId=payload,
+                      Tags=[
+                          {
+                              'Key':'CloseAccount',
+                              'Value':'true'
+                          }
+                      ]
+                  )
                   #Close account
                   close = orgs.close_account(
                       AccountId=payload
@@ -182,6 +214,6 @@ Resources:
                   print(payload + " closed")
       Handler: index.lambda_handler
       MemorySize: 128
-      Role: !GetAtt moveThenCleanAccountLambdaRole.Arn
+      Role: !GetAtt moveThenDeleteAccountLambdaRole.Arn
       Runtime: python3.9
-      Timeout: 60
+      Timeout: 10
