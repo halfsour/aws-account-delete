@@ -161,7 +161,7 @@ Resources:
           import os
 
           close_org = os.environ['CLOSING_OU_ID']
-          current_org = os.environ['activeOuId']
+          current_org = os.environ['ACTIVE_OU_ID']
 
           def lambda_handler(event, context):
               orgs = boto3.client('organizations')
