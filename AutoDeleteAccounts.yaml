@@ -7,7 +7,7 @@ Parameters:
   activeOuId:
     Type: String
     Description: The OU Id that will be checked for deletable accounts
-  closeWaitOuId:
+  closingOuId:
     Type: String
     Description: The OU Id where accounts will go to await deletion
   assumeRoleName:
@@ -57,11 +57,16 @@ Resources:
   getDeletableAccountsLambda:
     Type: AWS::Lambda::Function
     Properties:
+    Environment:
+      Variables:
+        SQS_QUEUE_URL: !GetAtt deletableAccountsQueue.QueueUrl
+        ACTIVE_OU_ID: !Ref activeOuId 
       Code:
         ZipFile: |
           import json
           import boto3
           import datetime
+          import os
 
           def days_old(date):
               get_date_obj = date
@@ -70,9 +75,9 @@ Resources:
               return diff.days
               
           def lambda_handler(event, context):
-              age=30
-              queue='https://sqs.us-east-2.amazonaws.com/804488500168/deletableAccounts'
-              ou = 'ou-8rh6-if0iq4lx'
+              age = 30
+              queue = os.environ['SSM_PARAMETER_NAME']
+              ou = os.environ['ACTIVE_OU_ID'] 
               orgs = boto3.client('organizations')
               sqs = boto3.client('sqs')
               accounts = orgs.list_children (
@@ -112,8 +117,8 @@ Resources:
       FunctionName: !GetAtt getDeletableAccountsLambda.Arn
       Principal: events.amazonaws.com
       SourceArn: !GetAtt getDeletableAccountsLambdaRule.Arn
-#Move the Account to the CloseWait OU and then use CodeBuild to delete the resources in the AWS Accounts before account deletion
-  moveThenCleanAccountLambdaRole:
+#Move the Account to the CloseWait OU & deletion
+  moveThenDeleteAccountLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -126,15 +131,6 @@ Resources:
             Condition: {}
       Path: /
       Policies:
-        - PolicyName: codebuild
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              Sid: codebuild
-              Effect: Allow
-              Action:
-                - codebuild:StartBuild
-              Resource: !GetAtt codeBuildProject.Arn
         - PolicyName: orgs
           PolicyDocument:
             Version: '2012-10-17'
@@ -150,130 +146,42 @@ Resources:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       EventSourceArn: !GetAtt deletableAccountsQueue.Arn
-      FunctionName: !GetAtt moveThenCleanAccountLambda.Arn
-  moveThenCleanAccountLambda:
+      FunctionName: !GetAtt moveThenDeleteAccountLambda.Arn
+  moveThenDeleteAccountLambda:
     Type:  AWS::Lambda::Function
     Properties:
+    Environment:
+      Variables:
+        CLOSING_OU_ID: !Ref closingOuId
+        ACTIVE_OU_ID: !Ref activeOuId
       Code:
         ZipFile: |
+          import json
+          import boto3
+          import os
 
+          close_org = os.environ['CLOSING_OU_ID']
+          current_org = os.environ['activeOuId']
+
+          def lambda_handler(event, context):
+              orgs = boto3.client('organizations')
+              
+              for record in  event['Records']:
+                  payload = record['body']
+                  #Move to close OU
+                  move = orgs.move_account(
+                      AccountId=payload,
+                      SourceParentId=current_org,
+                      DestinationParentId=close_org
+                  )
+                  print(payload + " moved.")
+                  #Close account
+                  close = orgs.close_account(
+                      AccountId=payload
+                  )
+                  print(payload + " closed")
       Handler: index.lambda_handler
       MemorySize: 128
       Role: !GetAtt moveThenCleanAccountLambdaRole.Arn
       Runtime: python3.9
       Timeout: 60
-  codeBuildProjectRole:
-    Type: AWS::IAM::Role
-    Properties:
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codebuild.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        -
-          PolicyName: NukeCodeBuildLogsPolicy
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              -
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource:
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:AccountNuker-${AWS::StackName}
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:AccountNuker-${AWS::StackName}:*
-        -
-         PolicyName: AssumeNukePolicy
-         PolicyDocument:
-           Version: 2012-10-17
-           Statement:
-              -
-                Effect: Allow
-                Action: sts:AssumeRole
-                Resource: !Sub arn:aws:iam::*:role/${AssumeRoleName}
-  codeBuildProject:
-    Type: AWS::CodeBuild::Project
-    Properties: 
-      Artifacts:
-        Type: NO_ARTIFACTS
-      BadgeEnabled: false
-      Description: Builds a container to run AWS-Nuke for all accounts within the specified OU
-      Environment:
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/docker:18.09.0
-        ImagePullCredentialsType: CODEBUILD
-        PrivilegedMode: true
-        Type: LINUX_CONTAINER
-        EnvironmentVariables:
-          - Name: AssumeRoleName
-            Type: PLAINTEXT
-            Value: !Ref assumeRoleName
-      LogsConfig:
-        CloudWatchLogs:
-          GroupName: !Sub "AccountNuker-${AWS::StackName}"
-          Status: ENABLED
-      Name: !Sub "AccountNuker-${AWS::StackName}"
-      ServiceRole: !GetAtt codeBuildProjectRole.Arn
-      Source:
-        BuildSpec: !Sub |
-          version: 0.2
-          phases:
-            install:
-              commands:
-                - apt-get install jq
-                - wget https://github.com/rebuy-de/aws-nuke/releases/download/v2.10.0/aws-nuke-v2.10.0-linux-amd64
-                - mv aws-nuke-v2.10.0-linux-amd64 /bin/aws-nuke
-                - chmod +x /bin/aws-nuke
-            build:
-              commands:
-                - ACCOUNT_LIST=${AWS_ACCOUNT_ID}
-                - |
-                  echo "---
-                  regions:
-                    - "global
-                    - "us-east-1"
-                    - "us-east-2"
-                    - "us-west-2"
-                  resource-types:
-                    excludes:
-                    - IAMRole
-                    - IAMRolePolicy
-                    - IAMRolePolicyAttachment
-                    - IAMSAMLProvider
-                    - IAMPolicy
-                    - IAMUser
-                    - IAMGroup
-                    - EC2VPC
-                    - EC2Subnet
-                    - EC2SecurityGroup
-                    - EC2RouteTable
-                  accounts:
-                    ${AWS_ACCOUNT_ID}: {}
-                  ">aws-nuke-config.yaml
-                - |
-                  for account_id in $ACCOUNT_LIST
-                  do
-                    echo "Assuming Role for Account $account_id";
-                    aws sts assume-role --role-arn arn:aws:iam::$account_id:role/${AssumeRoleName} --role-session-name account-$account_id --query "Credentials" > $account_id.json;
-                    cat $account_id.json
-                    ACCESS_KEY_ID=$(cat $account_id.json |jq -r .AccessKeyId);
-                    SECRET_ACCESS_KEY=$(cat $account_id.json |jq -r .SecretAccessKey);
-                    SESSION_TOKEN=$(cat $account_id.json |jq -r .SessionToken);
-                    echo "Running Nuke on Account $account_id";
-                    # TODO: Add --no-dry-run flag for Production
-                    aws-nuke -c aws-nuke-config.yaml --force --access-key-id $ACCESS_KEY_ID --secret-access-key $SECRET_ACCESS_KEY --session-token $SESSION_TOKEN |tee -a aws-nuke.log;
-                    nuke_pid=$!;
-                    wait $nuke_pid;
-                  done
-                - echo "Completed Nuke Process for all accounts"
-            post_build:
-              commands:
-                - cat aws-nuke.log
-        Type: NO_SOURCE
