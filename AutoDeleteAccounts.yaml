@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Delete Accounts in an OU After x Days
+Parameters:
+  age:
+    Type: String
+    Description: The age in days after which the account should be deleted
+  activeOuId:
+    Type: String
+    Description: The OU Id that will be checked for deletable accounts
+  closeWaitOuId:
+    Type: String
+    Description: The OU Id where accounts will go to await deletion
+  assumeRoleName:
+    Description: The name of the IAM Role to be assumed within each account, providing permissions to cleanse the account(s)
+    Type: String
+
+Resources:
+#Gather the list of AWS Accounts that should be deleted and send it to SQS
+  deletableAccountsQueue:
+    Type: AWS::SQS::Queue
+    Properties: 
+      QueueName: deletableAccounts
+  getDeletableAccountsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition: {}
+      Path: /
+      Policies:
+        - PolicyName: sqs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: sqs
+              Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt deletableAccountsQueue.Arn
+        - PolicyName: orgs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: orgs
+              Effect: Allow
+              Action:
+                - organizations:ListChildren
+                - organizations:DescribeAccounts
+              Resource: *
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  getDeletableAccountsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import datetime
+
+          def days_old(date):
+              get_date_obj = date
+              date_obj = get_date_obj.replace(tzinfo=None)
+              diff = datetime.datetime.now() - date_obj
+              return diff.days
+              
+          def lambda_handler(event, context):
+              age=30
+              queue='https://sqs.us-east-2.amazonaws.com/804488500168/deletableAccounts'
+              ou = 'ou-8rh6-if0iq4lx'
+              orgs = boto3.client('organizations')
+              sqs = boto3.client('sqs')
+              accounts = orgs.list_children (
+                  ParentId=ou,
+                  ChildType='ACCOUNT'
+              )
+              for i in accounts['Children']:
+                  account = orgs.describe_account(AccountId=i['Id'])
+                  print(account)
+                  create_date = account['Account']['JoinedTimestamp']
+                  account_age = days_old(create_date)
+                  print(account_age)
+                  if account_age > 30:
+                      msg = sqs.send_message(
+                          QueueUrl=queue,
+                          MessageBody=account['Account']['Id']
+                      )
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt getDeletableAccountsLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+  getDeletableAccountsLambdaRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(daily)
+      State: ENABLED
+      Targets:
+        -
+          Arn:
+            !GetAtt  getDeletableAccountsLambda.Arn
+          Id: getDeletableAccountsLambda
+  getDeletableAccountsLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt getDeletableAccountsLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt getDeletableAccountsLambdaRule.Arn
+#Move the Account to the CloseWait OU and then use CodeBuild to delete the resources in the AWS Accounts before account deletion
+  moveThenCleanAccountLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition: {}
+      Path: /
+      Policies:
+        - PolicyName: codebuild
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: codebuild
+              Effect: Allow
+              Action:
+                - codebuild:StartBuild
+              Resource: !GetAtt codeBuildProject.Arn
+        - PolicyName: orgs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Sid: orgs
+              Effect: Allow
+              Action:
+                - organizations:CloseAccount
+              Resource: !Sub 'arn:aws:organizations::*:account/${closeWaitOuId}/*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  moveThenCleanAccountTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt deletableAccountsQueue.Arn
+      FunctionName: !GetAtt moveThenCleanAccountLambda.Arn
+  moveThenCleanAccountLambda:
+    Type:  AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt moveThenCleanAccountLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+  codeBuildProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: NukeCodeBuildLogsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:AccountNuker-${AWS::StackName}
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:AccountNuker-${AWS::StackName}:*
+        -
+         PolicyName: AssumeNukePolicy
+         PolicyDocument:
+           Version: 2012-10-17
+           Statement:
+              -
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub arn:aws:iam::*:role/${AssumeRoleName}
+  codeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties: 
+      Artifacts:
+        Type: NO_ARTIFACTS
+      BadgeEnabled: false
+      Description: Builds a container to run AWS-Nuke for all accounts within the specified OU
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:18.09.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AssumeRoleName
+            Type: PLAINTEXT
+            Value: !Ref assumeRoleName
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Sub "AccountNuker-${AWS::StackName}"
+          Status: ENABLED
+      Name: !Sub "AccountNuker-${AWS::StackName}"
+      ServiceRole: !GetAtt codeBuildProjectRole.Arn
+      Source:
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - apt-get install jq
+                - wget https://github.com/rebuy-de/aws-nuke/releases/download/v2.10.0/aws-nuke-v2.10.0-linux-amd64
+                - mv aws-nuke-v2.10.0-linux-amd64 /bin/aws-nuke
+                - chmod +x /bin/aws-nuke
+            build:
+              commands:
+                - ACCOUNT_LIST=${AWS_ACCOUNT_ID}
+                - |
+                  echo "---
+                  regions:
+                    - "global
+                    - "us-east-1"
+                    - "us-east-2"
+                    - "us-west-2"
+                  resource-types:
+                    excludes:
+                    - IAMRole
+                    - IAMRolePolicy
+                    - IAMRolePolicyAttachment
+                    - IAMSAMLProvider
+                    - IAMPolicy
+                    - IAMUser
+                    - IAMGroup
+                    - EC2VPC
+                    - EC2Subnet
+                    - EC2SecurityGroup
+                    - EC2RouteTable
+                  accounts:
+                    ${AWS_ACCOUNT_ID}: {}
+                  ">aws-nuke-config.yaml
+                - |
+                  for account_id in $ACCOUNT_LIST
+                  do
+                    echo "Assuming Role for Account $account_id";
+                    aws sts assume-role --role-arn arn:aws:iam::$account_id:role/${AssumeRoleName} --role-session-name account-$account_id --query "Credentials" > $account_id.json;
+                    cat $account_id.json
+                    ACCESS_KEY_ID=$(cat $account_id.json |jq -r .AccessKeyId);
+                    SECRET_ACCESS_KEY=$(cat $account_id.json |jq -r .SecretAccessKey);
+                    SESSION_TOKEN=$(cat $account_id.json |jq -r .SessionToken);
+                    echo "Running Nuke on Account $account_id";
+                    # TODO: Add --no-dry-run flag for Production
+                    aws-nuke -c aws-nuke-config.yaml --force --access-key-id $ACCESS_KEY_ID --secret-access-key $SECRET_ACCESS_KEY --session-token $SESSION_TOKEN |tee -a aws-nuke.log;
+                    nuke_pid=$!;
+                    wait $nuke_pid;
+                  done
+                - echo "Completed Nuke Process for all accounts"
+            post_build:
+              commands:
+                - cat aws-nuke.log
+        Type: NO_SOURCE
