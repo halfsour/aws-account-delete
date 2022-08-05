@@ -19,10 +19,7 @@ Exampl via the CLI:
 aws cloudformation deploy --template-file ./AutoDeleteAccounts.yaml --stack-name autoCloseAccounts --parameter-overrides age=30 activeOuId=ou-1234-abcdefgh closingOuId=ou-wxyz-a1b2c3d4
 ```
 ### See Also:
-[Why did I receive a bill after I closed my AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/closed-account-bill/)
-
-[How can I reactivate my suspended AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/reactivate-suspended-account/)
-
-[Best Practices for Organizational Units with AWS Organizations](https://aws.amazon.com/blogs/mt/best-practices-for-organizational-units-with-aws-organizations/)
-
-[How do I close my AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/close-aws-account/)
+[Why did I receive a bill after I closed my AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/closed-account-bill/)  
+[How can I reactivate my suspended AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/reactivate-suspended-account/)  
+[Best Practices for Organizational Units with AWS Organizations](https://aws.amazon.com/blogs/mt/best-practices-for-organizational-units-with-aws-organizations/)  
+[How do I close my AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/close-aws-account/)  
