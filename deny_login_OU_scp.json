@@ -2,7 +2,7 @@
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "DenyNearlyAll",
+            "Sid": "DenyAll",
             "Effect": "Deny",
             "Action": "*",
             "Resource": "*",
