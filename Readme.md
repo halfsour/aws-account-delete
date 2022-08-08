@@ -18,6 +18,9 @@ Exampl via the CLI:
 ```bash
 aws cloudformation deploy --template-file ./AutoDeleteAccounts.yaml --stack-name autoCloseAccounts --parameter-overrides age=30 activeOuId=ou-1234-abcdefgh closingOuId=ou-wxyz-a1b2c3d4
 ```
+
+It is also a recommended that the OU for closing accounts be locked-down to prevent all actions to users except to the root user (or some very limited access user specific to your organization).  The deny_login_OU_scp.json file is provided as a working example for that policy.  Use with caution as it will effectively disable all actions in the accounts contained within the OU to which it is attached.
+
 ### See Also:
 [Why did I receive a bill after I closed my AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/closed-account-bill/)  
 [How can I reactivate my suspended AWS account?](https://aws.amazon.com/premiumsupport/knowledge-center/reactivate-suspended-account/)  
