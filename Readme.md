@@ -12,7 +12,7 @@ AWS restricts how frequently the CloseAccount API can be used within a 30 day pe
     - An OU for crititcal accounts that should never be deleted with this automation 
 
 ### Deployment:
-This is a single-stack clpudformation temolate can it can be deployed via the CLI or AWS Console
+This is a single-stack cloudformation template can it can be deployed via the CLI or AWS Console
 
 Exampl via the CLI:
 ```bash
